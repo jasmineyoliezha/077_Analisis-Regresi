@@ -1,0 +1,187 @@
+---
+title: "Praktikum 8 Analisis Regresi"
+author: "Jasmine Ramya Yoliezha"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown
+---
+
+# Package
+
+```{r}
+library(readxl)
+library(car) # untuk multikolinearitas
+library(olsrr) # untuk best subset
+library(MASS) # untuk forward, backward, dan stepwise
+library(glmnet) # untuk ridge dan lasso
+```
+
+# Data
+
+Data yang digunakan merupakan statistik performa 50 pemain pada turnamen Africa Cup of Nations (AFCON) 2025 (dihitung per 90 menit bermain), dengan 1 peubah respon yaitu rata-rata gol (goals) dan 10 peubah penjelas, yaitu rata-rata menit bermain (mins), expected goals (xg), jumlah tembakan (shots), tembakan tepat sasaran (sot), persentase konversi tembakan menjadi gol (conv_pct), xG per tembakan (xg_per_shot), total carries (carries_tot), carries yang berhasil (carries_suc), total progressive carries (progressive_tot), dan progressive carries yang berhasil (progressive_suc).
+
+```{r}
+data <- read_xlsx("Player Goals AFCON 2025.xlsx")
+colnames(data) <- c("name", "goals", "mins", "xg", "shots", "sot", "conv_pct",
+                     "xg_per_shot", "carries_tot", "carries_suc",
+                     "progressive_tot", "progressive_suc")
+data <- as.data.frame(data)
+rownames(data) <- data$name
+data$name <- NULL
+head(data)
+```
+
+# Uji F Parsial dan Sekuensial
+
+Kita Pakai : Y = goals, X1 = shots, X2 = conv_pct, X3 = mins
+
+## F Sekuensial
+
+```{r}
+# Model 1: tanpa prediktor
+m1 <- lm(goals ~ 1, data = data)
+
+# Model 2: tambah shots
+m2 <- lm(goals ~ shots, data = data)
+
+# Model 3: tambah conv_pct
+m3 <- lm(goals ~ shots + conv_pct, data = data)
+
+# Model 4 : tambah mins
+m4 <- lm(goals ~ shots + conv_pct + mins, data = data)
+
+```
+
+
+```{r}
+anova(m1, m2, m3, m4)
+```
+Variabel shots berpengaruh signifikan terhadap goals (F = 19.45; p < 0.001).
+Setelah memasukkan shots, variabel conv_pct masih memberikan tambahan pengaruh yang sangat signifikan (F = 34.74; p < 0.001).
+Namun, setelah shots dan conv_pct ada dalam model, variabel mins tidak memberikan pengaruh tambahan yang signifikan (F = 0.0002; p = 0.99).
+
+Kesimpulan: Model yang cukup baik adalah goals ~ shots + conv_pct, karena penambahan mins tidak meningkatkan kemampuan model secara signifikan — masuk akal karena lama bermain lebih berkaitan dengan kesempatan tampil, bukan langsung dengan efisiensi mencetak gol.
+
+## F Parsial
+
+Akan diuji apakah conv_pct signifikan setelah semua variabel lain dikontrol
+```{r}
+# full model
+full <- lm(goals ~ shots + conv_pct + mins, data = data)
+
+# reduced (tanpa conv_pct)
+red <- lm(goals ~ shots + mins, data = data)
+
+anova(red, full)
+```
+Variabel conv_pct berpengaruh signifikan terhadap goals setelah mengontrol shots dan mins (F = 32.15; p < 0.001).
+
+
+# Pemodelan Awal
+
+```{r}
+model1 <- lm(goals ~ ., data=data)
+summary(model1)
+```
+
+Persamaan yang terbentuk dari seluruh peubah tersebut menghasilkan nilai koefisien determinasi (R²) sebesar 73.02% dengan adjusted R² sebesar 66.10%, namun hanya 3 dari 10 peubah yang signifikan pada taraf nyata 5%, yaitu xg, shots, dan conv_pct — ketiganya memang secara langsung berkaitan dengan proses terjadinya gol. Selanjutnya akan diperiksa ada tidaknya multikolinearitas pada model.
+
+$\hat{goals} = 0.2853 - 0.0004\,mins + 0.6596\,xg + 0.0834\,shots + 0.0705\,sot + 0.5459\,conv\_pct - 0.9130\,xg\_per\_shot + 0.0141\,carries\_tot - 0.0150\,carries\_suc - 0.0141\,progressive\_tot - 0.0236\,progressive\_suc$
+
+# Pemeriksaan Multikolinieritas
+
+```{r}
+vif(model1)
+```
+
+Hasil pemeriksaan nilai VIF menunjukkan bahwa peubah progressive_tot memiliki VIF > 10 (≈10.74) dan peubah xg sangat mendekati ambang tersebut (≈9.71), sehingga terindikasi adanya multikolinearitas. Hal ini cukup masuk akal karena progressive_tot saling tumpang tindih secara konsep dengan carries_tot/carries_suc (sama-sama mengukur progresi bola), sementara xg secara matematis berkaitan erat dengan shots dan conv_pct. Temuan ini berbeda dari kasus sebelumnya yang bebas multikolinearitas, dan menjadi alasan kuat untuk mencoba pemodelan ridge pada bagian akhir praktikum ini.
+
+# Penyeleksian Peubah
+
+## Best Subset
+
+```{r}
+bs <- ols_step_best_subset(model1)
+bs
+```
+
+Dari hasil best subset, model terbaik untuk setiap ukuran (jumlah peubah) menunjukkan peningkatan R² yang melambat setelah 4-5 peubah. Beberapa kriteria justru tidak sepakat pada model dengan jumlah peubah yang sama:
+
+- Berdasarkan **AIC**, model terbaik memiliki 7 peubah: mins, xg, shots, conv_pct, xg_per_shot, carries_tot, carries_suc.
+- Berdasarkan **BIC/SBC**, model terbaik justru jauh lebih sederhana dengan 4 peubah: xg, shots, conv_pct, carries_suc.
+- Berdasarkan **adjusted R²**, model terbaik memiliki 9 peubah (mendekati model penuh).
+
+## Backward, Forward, dan Stepwise
+
+```{r}
+null<-lm(goals ~ 1, data=data) # 1 here means the intercept 
+full<-lm(goals ~ ., data=data)
+ 
+step(full, scope=list(lower=null, upper=full), data=data, direction='backward', trace=0)
+```
+
+```{r}
+step(null, scope=list(lower=null, upper=full), data=data, direction='forward', trace=0)
+```
+
+```{r}
+step(null, scope=list(lower=null, upper=full), data=data, direction='both', trace=0)
+```
+
+Berbeda dengan kasus sebelumnya di mana keempat metode penyeleksian memberikan hasil yang identik, pada data AFCON ini hasilnya **tidak seluruhnya sama**:
+
+- **Backward** hanya mengeluarkan 1 peubah (carries_suc), menyisakan 9 peubah dengan AIC ≈ -71.07.
+- **Forward** berhenti pada 8 peubah (tidak memasukkan progressive_tot dan progressive_suc) dengan AIC ≈ -71.22.
+- **Stepwise (both)**, yang dapat menambah maupun mengeluarkan peubah secara bergantian, berhasil menyederhanakan model menjadi 7 peubah — mins, xg, shots, conv_pct, xg_per_shot, carries_tot, carries_suc — dengan AIC ≈ -71.67, yaitu AIC terendah di antara semua metode dan **identik** dengan model terbaik hasil best subset berdasarkan kriteria AIC.
+
+Karena hasilnya berbeda-beda, dipilih model dengan AIC terendah (hasil stepwise both / best subset AIC) sebagai model2.
+
+```{r}
+model2 <- lm(goals ~ mins + xg + shots + conv_pct + xg_per_shot + carries_tot + carries_suc, data=data)
+summary(model2)
+```
+
+```{r}
+AIC(model2); BIC(model2)
+```
+
+Model yang dihasilkan memiliki 4 dari 7 peubah penjelas yang signifikan pada taraf nyata 5% (xg, shots, conv_pct, carries_suc), dengan adjusted R² sebesar 65.73% — sedikit lebih rendah dibanding model penuh (66.10%). Akan tetapi, nilai AIC turun dari -69.92 (model penuh) menjadi -71.67, dan BIC turun lebih tajam lagi dari -46.97 menjadi -54.46. Ini menunjukkan model yang lebih ringkas ini jauh lebih efisien tanpa banyak mengorbankan daya jelas model.
+
+$$\hat{goals} = 0.3491 - 0.0002\,mins + 0.7597\,xg + 0.1153\,shots + 0.6101\,conv\_pct - 0.9285\,xg\_per\_shot + 0.0071\,carries\_tot - 0.0375\,carries\_suc$$
+
+Sebagai pembanding, model tersederhana hasil BIC (4 peubah: xg, shots, conv_pct, carries_suc) justru memiliki **seluruh peubahnya signifikan** pada taraf nyata 5%, dengan adjusted R² 62.77%, AIC -70.08, dan BIC -58.60 (BIC terbaik di antara seluruh model yang dibandingkan):
+
+```{r}
+model3 <- lm(goals ~ xg + shots + conv_pct + carries_suc, data=data)
+summary(model3)
+AIC(model3); BIC(model3)
+```
+
+Jika orientasinya adalah kesederhanaan model dan kemudahan interpretasi (semua peubah signifikan, BIC terbaik), model3 menjadi pilihan yang lebih menarik. Namun jika orientasinya adalah AIC/prediksi, model2 sedikit lebih unggul. Hal ini menegaskan bahwa apabila metode seleksi peubah menghasilkan model yang berbeda, perbandingan dapat dilakukan melalui MSE, adjusted R-square, AIC, BIC, dan kriteria lainnya sesuai tujuan analisis.
+
+# Shrinkage Methods
+
+## Ridge
+
+```{r}
+x <- as.matrix(data[, -1])
+y <- data$goals
+
+rid <- cv.glmnet(x, y, alpha = 0, nfolds = 5)  # Ridge regression
+# secara default, nfolds = 10 sehingga akan buruk ketika n<30
+rid
+coef(rid, s = "lambda.min")
+```
+
+Model ridge yang terbentuk tetap menggunakan seluruh 10 peubah penjelas (tidak ada koefisien yang ditekan tepat ke nol), dengan koefisien xg, conv_pct, dan xg_per_shot tetap menjadi yang paling dominan secara magnitudo, sementara peubah lain seperti mins, carries_suc, progressive_tot, dan progressive_suc tertekan mendekati nol. Pemodelan ridge di sini terlihat berguna karena terdapat indikasi multikolinearitas pada xg dan progressive_tot (VIF mendekati/melebihi 10), sehingga peubah-peubah tersebut tidak perlu disisihkan namun estimasi koefisiennya menjadi lebih stabil.
+
+## Lasso
+
+```{r}
+lass <- cv.glmnet(x, y, alpha=1, nfolds = 5)
+lass
+coef(lass,s="lambda.min")
+```
+
+Lasso menghasilkan pemodelan regresi dengan penyusutan/penyeleksian peubah yang memiliki koefisien yang sangat mendekati atau bahkan tepat nol. Pada lambda.min, sebagian besar peubah masih dipertahankan dengan penyusutan ringan dibandingkan model OLS — peubah xg, shots, dan conv_pct tetap menjadi yang paling besar koefisiennya, sedangkan mins, carries_tot, progressive_tot, dan progressive_suc tersusut paling banyak menuju nol. 
+
